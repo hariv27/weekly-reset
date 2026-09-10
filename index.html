@@ -177,6 +177,14 @@
 <body>
 <div class="wrap">
 
+  <div id="signedOutView" style="text-align:center;padding:100px 20px;">
+    <h1 style="margin-bottom:16px;">Weekly reset</h1>
+    <p style="color:var(--muted);font-size:16px;margin:0 0 24px;">Sign in to see your data — synced across every device.</p>
+    <button id="signInBtn" class="why-btn" style="font-size:15px;padding:10px 22px;">Sign in with Google</button>
+  </div>
+
+  <div id="mainContent" style="display:none;">
+
   <header class="top">
     <h1>Weekly reset</h1>
     <div class="nav">
@@ -185,6 +193,12 @@
       <button id="nextWeek">›</button>
     </div>
   </header>
+
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:6px;">
+    <span id="userEmail" style="font-size:13px;color:var(--muted);"></span>
+    <button id="signOutBtn" class="why-btn">Sign out</button>
+  </div>
+
 
   <div class="why-row">
     <input class="why-text" id="whyText" placeholder="why you're doing this week — write your own">
@@ -223,10 +237,33 @@
     <div id="reportChart"></div>
   </div>
 
+  </div>
+
 </div>
 <div class="save-note" id="saveNote">saved</div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import {
+  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc, collection, getDocs
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyD31-PAkGm6T1BM17YLZ8gM2bBNNDlUGs0",
+  authDomain: "weekly-reset-652e5.firebaseapp.com",
+  projectId: "weekly-reset-652e5",
+  storageBucket: "weekly-reset-652e5.firebasestorage.app",
+  messagingSenderId: "386215093843",
+  appId: "1:386215093843:web:2aad530435d53b26bb08a6"
+};
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = getFirestore(fbApp);
+let currentUser = null;
+
 const DAYS = ['sun','mon','tue','wed','thu','fri','sat'];
 const HABITS = [
   {key:'workout', label:'Workout', mode:'tri'},
@@ -247,7 +284,7 @@ function getSunday(d){
 }
 function iso(d){ return d.toISOString().slice(0,10); }
 function addDays(d,n){ const nd = new Date(d); nd.setDate(nd.getDate()+n); return nd; }
-function weekKey(sunday){ return 'week_' + iso(sunday); }
+function weekKey(sunday){ return iso(sunday); }
 function fmtRange(sunday){
   const sat = addDays(sunday,6);
   const opts = {month:'short', day:'numeric'};
@@ -277,8 +314,8 @@ function triIcon(s){ return s==='done' ? '✓' : s==='partial' ? '•' : ''; }
 async function loadWeek(sunday){
   const key = weekKey(sunday);
   try{
-    const res = await window.storage.get(key, false);
-    currentData = res ? JSON.parse(res.value) : emptyWeek();
+    const snap = await getDoc(doc(db,'users',currentUser.uid,'weeks',key));
+    currentData = snap.exists() ? snap.data() : emptyWeek();
   }catch(e){
     currentData = emptyWeek();
   }
@@ -300,7 +337,7 @@ function scheduleSave(){
 async function saveWeek(){
   const key = weekKey(currentSunday);
   try{
-    await window.storage.set(key, JSON.stringify(currentData), false);
+    await setDoc(doc(db,'users',currentUser.uid,'weeks',key), currentData);
     flashSaved();
   }catch(e){ console.error('save failed', e); }
 }
@@ -313,8 +350,8 @@ function flashSaved(){
 async function loadWhys(){
   let data = {current:'', history:[]};
   try{
-    const res = await window.storage.get('whys', false);
-    if(res) data = JSON.parse(res.value);
+    const snap = await getDoc(doc(db,'users',currentUser.uid,'meta','whys'));
+    if(snap.exists()) data = snap.data();
   }catch(e){}
   document.getElementById('whyText').value = data.current || '';
   const sel = document.getElementById('whyHistory');
@@ -327,7 +364,7 @@ async function loadWhys(){
   return data;
 }
 async function saveWhys(current, history){
-  try{ await window.storage.set('whys', JSON.stringify({current, history}), false); }catch(e){}
+  try{ await setDoc(doc(db,'users',currentUser.uid,'meta','whys'), {current, history}); }catch(e){}
 }
 
 function render(){
@@ -438,21 +475,12 @@ function renderCounters(){
 
 // ---- streaks + comparison (reads across all stored weeks) ----
 async function renderStreaksAndCompare(){
-  let keys = [];
-  try{
-    const res = await window.storage.list('week_', false);
-    keys = (res && res.keys) ? res.keys : [];
-  }catch(e){}
-
   const weeksData = {};
   weeksData[weekKey(currentSunday)] = currentData;
-  const fetches = keys.filter(k => k !== weekKey(currentSunday)).map(async k => {
-    try{
-      const r = await window.storage.get(k, false);
-      if(r) weeksData[k] = JSON.parse(r.value);
-    }catch(e){}
-  });
-  await Promise.all(fetches);
+  try{
+    const snaps = await getDocs(collection(db,'users',currentUser.uid,'weeks'));
+    snaps.forEach(d => { if(d.id !== weekKey(currentSunday)) weeksData[d.id] = d.data(); });
+  }catch(e){}
 
   const sortedWeekKeys = Object.keys(weeksData).sort();
 
@@ -463,7 +491,7 @@ async function renderStreaksAndCompare(){
   HABITS.forEach(h => {
     const timeline = [];
     sortedWeekKeys.forEach(wk => {
-      const sunday = new Date(wk.replace('week_',''));
+      const sunday = new Date(wk);
       const arr = weeksData[wk].habitStatus[h.key] || [];
       for(let i=0;i<7;i++){
         const dayDate = addDays(sunday,i);
@@ -591,11 +619,23 @@ document.getElementById('whyHistory').onchange = async (e) => {
   }
 };
 
-(async function init(){
-  const w = await loadWhys();
-  whyHistoryCache = w.history || [];
-  await loadWeek(currentSunday);
-})();
+document.getElementById('signInBtn').onclick = () => signInWithPopup(auth, new GoogleAuthProvider());
+document.getElementById('signOutBtn').onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, async (user) => {
+  currentUser = user;
+  if(user){
+    document.getElementById('signedOutView').style.display = 'none';
+    document.getElementById('mainContent').style.display = '';
+    document.getElementById('userEmail').textContent = user.email || user.displayName || '';
+    const w = await loadWhys();
+    whyHistoryCache = w.history || [];
+    await loadWeek(currentSunday);
+  } else {
+    document.getElementById('signedOutView').style.display = '';
+    document.getElementById('mainContent').style.display = 'none';
+  }
+});
 </script>
 </body>
 </html>
